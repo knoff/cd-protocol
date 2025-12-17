@@ -4,9 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cd_protocol"
-version = "0.1.0"
-description = "Binary protocol definitions for HeadUnit"
+version = "0.2.0"
+description = "Coffee Digital HeadUnit Binary Protocol (ESP-NOW)"
 requires-python = ">=3.9"
+dependencies = []
 
 [tool.setuptools.packages.find]
 where = ["src/python"]
