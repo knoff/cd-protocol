@@ -1,7 +1,7 @@
 /**
  * @file headunit_protocol.h
  * @brief Бинарный протокол внутренней шины Coffee Digital HeadUnit (ESP-NOW)
- * @version 1.0.0
+ * @version 0.1.0
  */
 
 #pragma once
