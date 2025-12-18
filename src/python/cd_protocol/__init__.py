@@ -10,41 +10,46 @@ HU_MAX_PAYLOAD_SIZE = 230
 HEADER_SIZE = 9  # struct.calcsize("<BBBBBBHB")
 
 
-# === 2. DEVICE ADDRESSING ===
-class DeviceID(IntEnum):
-    BROADCAST = 0xFF
+# === 2. ADDRESSING & TYPES ===
+class DeviceAddress(IntEnum):
     COORDINATOR = 0x01
+    BROADCAST = 0xFF
+    UNASSIGNED = 0xFE
 
-    # Actuators & Sensors
-    BOILER_MAIN = 0x10
-    BOILER_STEAM = 0x11
-    GROUP_HEAD = 0x12
-    PUMP_MAIN = 0x13
 
-    # HMI & Peripherals
+class DeviceType(IntEnum):
+    UNKNOWN = 0x00
+    COORDINATOR = 0x01
+    BOILER_PID = 0x10
+    PUMP_CTRL = 0x11
+    VALVE_SOLENOID = 0x12
+    VALVE_SERVO = 0x13
     SCALES = 0x20
-    HAPTIC_KNOB_L = 0x30
-    HAPTIC_KNOB_R = 0x31
-    STEAM_LEVER = 0x32
-    BUTTON_PAD = 0x33
+    HAPTIC_KNOB = 0x30
+    BUTTON_PAD = 0x31
+    SENSOR_HUB = 0x32
 
 
-# === 3. MESSAGE TYPES ===
+# === 3. MSG TYPES ===
 class MsgType(IntEnum):
-    # System
     PING = 0x01
     ACK = 0x02
     ERROR = 0x03
-    DISCOVERY = 0x04
 
-    # Control (RPi -> Node)
+    # Provisioning
+    SYS_DISCOVERY_REQ = 0x05
+    SYS_DISCOVERY_RES = 0x06
+    SYS_ASSIGN_ID = 0x07
+    SYS_REBOOT = 0x08
+
+    # Control
     CMD_SET_STATE = 0x10
     CMD_PROFILE_STEP = 0x11
     CMD_HAPTIC_CFG = 0x12
     CMD_UI_WIDGET = 0x13
     CMD_UI_MENU = 0x14
 
-    # Events (Node -> RPi)
+    # Events
     EVENT_UI_INPUT = 0x20
     EVENT_CRITICAL = 0x21
     EVENT_FLOW_START = 0x22
@@ -83,6 +88,30 @@ class InputEvent(IntEnum):
 
 
 @dataclass
+class PayloadDiscoveryRes:
+    device_type: int
+    hw_revision: int
+    fw_major: int
+    fw_minor: int
+    current_id: int
+
+    @classmethod
+    def unpack(cls, data: bytes):
+        if len(data) < 5:
+            return None
+        return cls(*struct.unpack("<BBBBB", data[:5]))
+
+
+@dataclass
+class PayloadAssignID:
+    target_mac: bytes  # 6 bytes
+    new_logical_id: int
+
+    def pack(self) -> bytes:
+        return struct.pack("<6sB", self.target_mac, self.new_logical_id)
+
+
+@dataclass
 class PayloadProfileStep:
     duration_ms: int
     target_temp_c: int  # x100
@@ -92,7 +121,6 @@ class PayloadProfileStep:
     flags: int = 0
 
     def pack(self) -> bytes:
-        # H = uint16, h = int16, B = uint8
         return struct.pack(
             "<HhhhBB",
             self.duration_ms,
@@ -126,7 +154,6 @@ class PayloadScaleData:
 
     @classmethod
     def unpack(cls, data: bytes):
-        # I = uint32, i = int32, h = int16, B = uint8
         if len(data) < 11:
             return None
         vals = struct.unpack("<IihB", data[:11])
@@ -143,7 +170,6 @@ class PayloadInputEvent:
     def unpack(cls, data: bytes):
         if len(data) < 6:
             return None
-        # B = uint8, i = int32
         vals = struct.unpack("<BBi", data[:6])
         return cls(*vals)
 

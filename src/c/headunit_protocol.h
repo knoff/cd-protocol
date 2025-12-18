@@ -1,7 +1,7 @@
 /**
  * @file headunit_protocol.h
  * @brief Binary Protocol for Coffee Digital HeadUnit (ESP-NOW)
- * @version 0.2.0 (Architecture Release)
+ * @version 0.2.1 (Dynamic Addressing Support)
  */
 
 #pragma once
@@ -12,53 +12,71 @@
 // === 1. TRANSPORT LAYER CONSTANTS ===
 #define HU_PROTOCOL_MAGIC 0xA5
 #define HU_PROTOCOL_VERSION 0x02
-#define HU_MAX_PAYLOAD_SIZE 230 // ESP-NOW limit minus headers
+#define HU_MAX_PAYLOAD_SIZE 230
 
-// === 2. DEVICE ADDRESSING (Logical IDs) ===
+// === 2. ADDRESSING & TYPES ===
+
+// Logical Addresses (assigned by RPi)
 typedef enum
 {
-  HU_DEV_BROADCAST = 0xFF,
-  HU_DEV_COORDINATOR = 0x01, // USB Dongle / RPi Gateway
+  HU_ADDR_COORDINATOR = 0x01, // RPi Host
+  HU_ADDR_BROADCAST = 0xFF,   // To All
+  HU_ADDR_UNASSIGNED = 0xFE,  // Default for new devices
 
-  // Actuators & Sensors
-  HU_DEV_BOILER_MAIN = 0x10,
-  HU_DEV_BOILER_STEAM = 0x11,
-  HU_DEV_GROUP_HEAD = 0x12,
-  HU_DEV_PUMP_MAIN = 0x13,
+  // Dynamic Range: 0x10 ... 0xFD
+  HU_ADDR_MIN_DYNAMIC = 0x10,
+  HU_ADDR_MAX_DYNAMIC = 0xFD
+} hu_device_address_t;
 
-  // HMI & Peripherals
-  HU_DEV_SCALES = 0x20,
-  HU_DEV_HAPTIC_KNOB_L = 0x30, // Левая группа
-  HU_DEV_HAPTIC_KNOB_R = 0x31, // Правая группа
-  HU_DEV_STEAM_LEVER = 0x32,
-  HU_DEV_BUTTON_PAD = 0x33
-} hu_device_id_t;
+// Device Types (Firmware Class)
+typedef enum
+{
+  HU_TYPE_UNKNOWN = 0x00,
+  HU_TYPE_COORDINATOR = 0x01,
+
+  // Actuators
+  HU_TYPE_BOILER_PID = 0x10,     // Heater + NTC
+  HU_TYPE_PUMP_CTRL = 0x11,      // Motor + Flow Meter
+  HU_TYPE_VALVE_SOLENOID = 0x12, // Simple ON/OFF
+  HU_TYPE_VALVE_SERVO = 0x13,    // Variable position
+
+  // Sensors & UI
+  HU_TYPE_SCALES = 0x20,      // Load cell bridge
+  HU_TYPE_HAPTIC_KNOB = 0x30, // Motor + Encoder + Screen
+  HU_TYPE_BUTTON_PAD = 0x31,  // Simple buttons
+  HU_TYPE_SENSOR_HUB = 0x32   // Multiple temp/pressure sensors
+} hu_device_type_t;
 
 // === 3. MESSAGE TYPES ===
 typedef enum
 {
-  // --- System Level ---
+  // --- System / Provisioning ---
   HU_MSG_PING = 0x01,
   HU_MSG_ACK = 0x02,
   HU_MSG_ERROR = 0x03,
-  HU_MSG_DISCOVERY = 0x04, // "Я тут, мой ID такой-то"
+
+  // Discovery & Config
+  HU_MSG_SYS_DISCOVERY_REQ = 0x05, // RPi -> Broadcast: "Who is out there?"
+  HU_MSG_SYS_DISCOVERY_RES = 0x06, // Node -> RPi: "I am Type X, MAC Y"
+  HU_MSG_SYS_ASSIGN_ID = 0x07,     // RPi -> Node: "Your new Logical ID is Z"
+  HU_MSG_SYS_REBOOT = 0x08,
 
   // --- Control (RPi -> Node) ---
-  HU_MSG_CMD_SET_STATE = 0x10,    // Simple ON/OFF (Valve, Relay)
-  HU_MSG_CMD_PROFILE_STEP = 0x11, // Vector update (Time, T, P, F)
-  HU_MSG_CMD_HAPTIC_CFG = 0x12,   // Config motor physics
-  HU_MSG_CMD_UI_WIDGET = 0x13,    // Draw single widget
-  HU_MSG_CMD_UI_MENU = 0x14,      // Update list/menu items
+  HU_MSG_CMD_SET_STATE = 0x10,
+  HU_MSG_CMD_PROFILE_STEP = 0x11,
+  HU_MSG_CMD_HAPTIC_CFG = 0x12,
+  HU_MSG_CMD_UI_WIDGET = 0x13,
+  HU_MSG_CMD_UI_MENU = 0x14,
 
-  // --- Events (Node -> RPi / Broadcast) ---
-  HU_MSG_EVENT_UI_INPUT = 0x20,   // Button click, Knob turn
-  HU_MSG_EVENT_CRITICAL = 0x21,   // ERROR! Stop everything
-  HU_MSG_EVENT_FLOW_START = 0x22, // Scale: First drop detected
+  // --- Events (Node -> RPi) ---
+  HU_MSG_EVENT_UI_INPUT = 0x20,
+  HU_MSG_EVENT_CRITICAL = 0x21,
+  HU_MSG_EVENT_FLOW_START = 0x22,
 
   // --- Telemetry (Node -> RPi) ---
-  HU_MSG_DATA_SENSOR = 0x30, // Single float value
-  HU_MSG_DATA_MULTI = 0x31,  // Compact array
-  HU_MSG_DATA_SCALE = 0x32   // Weight + Flow Rate
+  HU_MSG_DATA_SENSOR = 0x30,
+  HU_MSG_DATA_MULTI = 0x31,
+  HU_MSG_DATA_SCALE = 0x32
 } hu_msg_type_t;
 
 // === 4. ENUMS & FLAGS ===
@@ -101,8 +119,8 @@ typedef struct
 {
   uint8_t magic;    // 0xA5
   uint8_t flags;    // 0x01=NEED_ACK, 0x02=RETRANSMITTED
-  uint8_t src_id;   // hu_device_id_t
-  uint8_t dst_id;   // hu_device_id_t
+  uint8_t src_id;   // hu_device_address_t
+  uint8_t dst_id;   // hu_device_address_t
   uint8_t via_id;   // 0 = Direct
   uint8_t msg_type; // hu_msg_type_t
   uint16_t seq_num; // Deduplication
@@ -110,6 +128,24 @@ typedef struct
 } hu_frame_header_t;
 
 // --- PAYLOADS ---
+
+// Discovery Response (Node -> RPi)
+typedef struct
+{
+  uint8_t device_type; // hu_device_type_t
+  uint8_t hw_revision; // e.g. 1 (Rev A)
+  uint8_t fw_major;
+  uint8_t fw_minor;
+  uint8_t current_id; // 0xFE if not configured
+                      // MAC is in the L2 frame header
+} hu_payload_discovery_res_t;
+
+// Assign ID (RPi -> Node)
+typedef struct
+{
+  uint8_t target_mac[6];  // Safety check
+  uint8_t new_logical_id; // 0x10...0xFD
+} hu_payload_assign_id_t;
 
 // 1. Vector Profile Step (JIT Execution)
 typedef struct
@@ -119,7 +155,7 @@ typedef struct
   int16_t target_flow_ml;   // x100 (ml/s)
   int16_t target_press_bar; // x100 (900 = 9.0 bar)
   uint8_t priority;         // hu_profile_priority_t
-  uint8_t flags;            // Bitmask (e.g., "Interpolate to next")
+  uint8_t flags;            // Bitmask
 } hu_payload_profile_step_t;
 
 // 2. Haptic Config
@@ -131,24 +167,23 @@ typedef struct
   int16_t param_2;  // Snap strength / Stiffness / Max Angle
 } hu_payload_haptic_cfg_t;
 
-// 3. UI Menu Item (Single entry)
-// Used inside an array. Max 5-6 items per packet.
+// 3. UI Menu Item
 typedef struct
 {
   uint8_t item_id; // ID to send back on click
-  uint8_t icon_id; // 0=None, 1=Settings, 2=Coffee...
-  uint8_t flags;   // 1=Selected, 2=Disabled, 4=IsBack, 8=IsNext
-  char text[24];   // UTF-8 string (approx 12 Cyrillic chars)
+  uint8_t icon_id; // 0=None
+  uint8_t flags;   // 1=Selected, 2=Disabled
+  char text[24];   // UTF-8 string
 } hu_menu_item_t;
 
 // 3b. UI Menu Packet
 typedef struct
 {
-  uint8_t list_id;     // Context ID
-  uint8_t total_items; // Total in list (for scrollbar calc)
-  uint8_t start_index; // Index of the first item in this packet
-  uint8_t items_count; // How many items follow (max 5)
-                       // hu_menu_item_t items[]; // Variable length
+  uint8_t list_id;
+  uint8_t total_items;
+  uint8_t start_index;
+  uint8_t items_count;
+  // hu_menu_item_t items[];
 } hu_payload_ui_menu_t;
 
 // 4. Scales Telemetry
@@ -163,9 +198,9 @@ typedef struct
 // 5. Input Event (Knob/Button)
 typedef struct
 {
-  uint8_t source_index; // Which button/encoder on the board (0, 1...)
+  uint8_t source_index; // Which button/encoder
   uint8_t event_type;   // hu_input_event_t
-  int32_t value;        // Duration (ms) or Encoder Delta (+1/-1) or Absolute Pos
+  int32_t value;        // Duration or Delta
 } hu_payload_event_input_t;
 
 #pragma pack(pop)

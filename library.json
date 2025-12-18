@@ -1,6 +1,6 @@
 {
   "name": "cd-protocol",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Coffee Digital Binary Protocol",
   "frameworks": ["arduino", "espidf"],
   "platforms": ["espressif32"],
