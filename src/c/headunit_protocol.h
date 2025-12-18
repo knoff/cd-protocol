@@ -1,7 +1,7 @@
 /**
  * @file headunit_protocol.h
  * @brief Binary Protocol for Coffee Digital HeadUnit (ESP-NOW)
- * @version 0.2.1 (Dynamic Addressing Support)
+ * @version 0.2.3 (Compact Profile Nodes)
  */
 
 #pragma once
@@ -36,7 +36,7 @@ typedef enum
 
   // Actuators
   HU_TYPE_BOILER_PID = 0x10,     // Heater + NTC
-  HU_TYPE_PUMP_CTRL = 0x11,      // Motor + Flow Meter
+  HU_TYPE_PUMP_CTRL = 0x11,      // Motor + Flow meter
   HU_TYPE_VALVE_SOLENOID = 0x12, // Simple ON/OFF
   HU_TYPE_VALVE_SERVO = 0x13,    // Variable position
 
@@ -56,14 +56,14 @@ typedef enum
   HU_MSG_ERROR = 0x03,
 
   // Discovery & Config
-  HU_MSG_SYS_DISCOVERY_REQ = 0x05, // RPi -> Broadcast: "Who is out there?"
-  HU_MSG_SYS_DISCOVERY_RES = 0x06, // Node -> RPi: "I am Type X, MAC Y"
-  HU_MSG_SYS_ASSIGN_ID = 0x07,     // RPi -> Node: "Your new Logical ID is Z"
+  HU_MSG_SYS_DISCOVERY_REQ = 0x05, // RPi -> Broadcast
+  HU_MSG_SYS_DISCOVERY_RES = 0x06, // Node -> RPi
+  HU_MSG_SYS_ASSIGN_ID = 0x07,     // RPi -> Node
   HU_MSG_SYS_REBOOT = 0x08,
 
   // --- Control (RPi -> Node) ---
   HU_MSG_CMD_SET_STATE = 0x10,
-  HU_MSG_CMD_PROFILE_STEP = 0x11,
+  HU_MSG_CMD_PROFILE_LOAD = 0x11, // Load full profile chunk
   HU_MSG_CMD_HAPTIC_CFG = 0x12,
   HU_MSG_CMD_UI_WIDGET = 0x13,
   HU_MSG_CMD_UI_MENU = 0x14,
@@ -71,7 +71,7 @@ typedef enum
   // --- Events (Node -> RPi) ---
   HU_MSG_EVENT_UI_INPUT = 0x20,
   HU_MSG_EVENT_CRITICAL = 0x21,
-  HU_MSG_EVENT_FLOW_START = 0x22,
+  HU_MSG_EVENT_FLOW_START = 0x22, // First drop
 
   // --- Telemetry (Node -> RPi) ---
   HU_MSG_DATA_SENSOR = 0x30,
@@ -81,32 +81,37 @@ typedef enum
 
 // === 4. ENUMS & FLAGS ===
 
-// Priority modes for Profile (Conflict Resolution)
 typedef enum
 {
-  HU_PRIORITY_FLOW = 0,     // Keep flow, ignore pressure
-  HU_PRIORITY_PRESSURE = 1, // Keep pressure, sacrifice flow
-  HU_PRIORITY_HYBRID = 2    // Energy / Experimental
+  HU_PRIORITY_FLOW_IN = 0,  // Pump priority
+  HU_PRIORITY_PRESSURE = 1, // Pressure priority
+  HU_PRIORITY_FLOW_OUT = 2, // Scales priority (Gravimetric)
+  HU_PRIORITY_ENERGY = 3    // Energy priority
 } hu_profile_priority_t;
 
-// Haptic Modes
 typedef enum
 {
-  KNOB_MODE_FREE = 0,    // Подшипник
-  KNOB_MODE_DETENTS = 1, // Щелчки (Menu)
-  KNOB_MODE_SPRING = 2,  // Пружина (Manual Shot)
-  KNOB_MODE_BARRIER = 3, // Упоры (Min/Max)
-  KNOB_MODE_SERVO = 4    // Force movement
+  HU_INTERPOLATION_LINEAR = 0,
+  HU_INTERPOLATION_SPLINE = 1,
+  HU_INTERPOLATION_STEP = 2
+} hu_interpolation_t;
+
+typedef enum
+{
+  KNOB_MODE_FREE = 0,
+  KNOB_MODE_DETENTS = 1,
+  KNOB_MODE_SPRING = 2,
+  KNOB_MODE_BARRIER = 3,
+  KNOB_MODE_SERVO = 4
 } hu_haptic_mode_t;
 
-// UI Input Types
 typedef enum
 {
   INPUT_CLICK_SHORT = 0,
   INPUT_CLICK_LONG = 1,
   INPUT_HOLD_START = 2,
   INPUT_HOLD_END = 3,
-  INPUT_ROTATE = 4, // +Value / -Value
+  INPUT_ROTATE = 4,
   INPUT_TOUCH = 5
 } hu_input_event_t;
 
@@ -118,7 +123,7 @@ typedef enum
 typedef struct
 {
   uint8_t magic;    // 0xA5
-  uint8_t flags;    // 0x01=NEED_ACK, 0x02=RETRANSMITTED
+  uint8_t flags;    // 0x01=NEED_ACK
   uint8_t src_id;   // hu_device_address_t
   uint8_t dst_id;   // hu_device_address_t
   uint8_t via_id;   // 0 = Direct
@@ -129,78 +134,86 @@ typedef struct
 
 // --- PAYLOADS ---
 
-// Discovery Response (Node -> RPi)
+// Discovery Response
 typedef struct
 {
   uint8_t device_type; // hu_device_type_t
-  uint8_t hw_revision; // e.g. 1 (Rev A)
+  uint8_t hw_revision;
   uint8_t fw_major;
   uint8_t fw_minor;
-  uint8_t current_id; // 0xFE if not configured
-                      // MAC is in the L2 frame header
+  uint8_t current_id; // 0xFE if unassigned
 } hu_payload_discovery_res_t;
 
-// Assign ID (RPi -> Node)
+// Assign ID
 typedef struct
 {
-  uint8_t target_mac[6];  // Safety check
-  uint8_t new_logical_id; // 0x10...0xFD
+  uint8_t target_mac[6];
+  uint8_t new_logical_id;
 } hu_payload_assign_id_t;
 
-// 1. Vector Profile Step (JIT Execution)
+// COMPACT PROFILE NODE (13 bytes)
+// Scaling:
+// Temp:   1 LSB = 0.5 C   (0 .. 127.5 C)
+// Press:  1 LSB = 0.1 Bar (0 .. 25.5 Bar)
+// Flow:   1 LSB = 0.1 ml/s(0 .. 25.5 ml/s)
+// Energy: 1 LSB = 1 Unit  (0 .. 255)
 typedef struct
 {
-  uint16_t duration_ms;     // How long to hold this state
-  int16_t target_temp_c;    // x100 (9350 = 93.5 C)
-  int16_t target_flow_ml;   // x100 (ml/s)
-  int16_t target_press_bar; // x100 (900 = 9.0 bar)
-  uint8_t priority;         // hu_profile_priority_t
-  uint8_t flags;            // Bitmask
-} hu_payload_profile_step_t;
+  uint16_t time_offset_ms; // 0..65535 ms
 
-// 2. Haptic Config
+  // Bits 0-1: hu_interpolation_t
+  // Bits 2-3: hu_profile_priority_t
+  // Bits 4-7: Reserved
+  uint8_t config_flags;
+
+  uint8_t temp_target; // Val * 0.5
+  uint8_t temp_tol;    // Val * 0.5
+
+  uint8_t press_target; // Val * 0.1
+  uint8_t press_tol;    // Val * 0.1
+
+  uint8_t flow_in_target; // Val * 0.1 (Pump)
+  uint8_t flow_in_tol;    // Val * 0.1
+
+  uint8_t flow_out_target; // Val * 0.1 (Scales)
+  uint8_t flow_out_tol;    // Val * 0.1
+
+  uint8_t energy_target; // Raw Index
+  uint8_t energy_tol;    // Raw Index
+} hu_profile_node_t;
+
+// Profile Load Packet (Max ~17 nodes)
+typedef struct
+{
+  uint8_t profile_id;
+  uint8_t total_nodes;
+  // hu_profile_node_t nodes[];
+} hu_payload_profile_load_t;
+
+// Haptic Config
 typedef struct
 {
   uint8_t mode;     // hu_haptic_mode_t
-  uint8_t strength; // 0-100% (Force/Current)
-  int16_t param_1;  // Steps count / Spring Center / Min Angle
-  int16_t param_2;  // Snap strength / Stiffness / Max Angle
+  uint8_t strength; // 0-100%
+  int16_t param_1;  // Steps / Center / Min
+  int16_t param_2;  // Snap / Stiffness / Max
 } hu_payload_haptic_cfg_t;
 
-// 3. UI Menu Item
-typedef struct
-{
-  uint8_t item_id; // ID to send back on click
-  uint8_t icon_id; // 0=None
-  uint8_t flags;   // 1=Selected, 2=Disabled
-  char text[24];   // UTF-8 string
-} hu_menu_item_t;
-
-// 3b. UI Menu Packet
-typedef struct
-{
-  uint8_t list_id;
-  uint8_t total_items;
-  uint8_t start_index;
-  uint8_t items_count;
-  // hu_menu_item_t items[];
-} hu_payload_ui_menu_t;
-
-// 4. Scales Telemetry
+// Scales Telemetry
 typedef struct
 {
   uint32_t timestamp_ms;
-  int32_t weight_mg; // Current weight (mg)
-  int16_t flow_mg_s; // Output Flow (derivative)
-  uint8_t status;    // 1=Stable, 2=TareDone
+  int32_t weight_mg;
+  int16_t flow_mg_s;
+  uint8_t status;
 } hu_payload_scale_data_t;
 
-// 5. Input Event (Knob/Button)
+// Input Event
 typedef struct
 {
-  uint8_t source_index; // Which button/encoder
-  uint8_t event_type;   // hu_input_event_t
-  int32_t value;        // Duration or Delta
+  uint8_t source_index;
+  uint8_t event_type; // hu_input_event_t
+  int32_t value;
 } hu_payload_event_input_t;
 
 #pragma pack(pop)

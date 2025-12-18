@@ -1,7 +1,7 @@
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Optional, Tuple
+from typing import Optional, List, Tuple
 
 # === 1. CONSTANTS ===
 HU_PROTOCOL_MAGIC = 0xA5
@@ -44,7 +44,7 @@ class MsgType(IntEnum):
 
     # Control
     CMD_SET_STATE = 0x10
-    CMD_PROFILE_STEP = 0x11
+    CMD_PROFILE_LOAD = 0x11  # Updated
     CMD_HAPTIC_CFG = 0x12
     CMD_UI_WIDGET = 0x13
     CMD_UI_MENU = 0x14
@@ -62,9 +62,16 @@ class MsgType(IntEnum):
 
 # === 4. ENUMS ===
 class Priority(IntEnum):
-    FLOW = 0
+    FLOW_IN = 0
     PRESSURE = 1
-    HYBRID = 2
+    FLOW_OUT = 2
+    ENERGY = 3
+
+
+class Interpolation(IntEnum):
+    LINEAR = 0
+    SPLINE = 1
+    STEP = 2
 
 
 class HapticMode(IntEnum):
@@ -112,32 +119,76 @@ class PayloadAssignID:
 
 
 @dataclass
-class PayloadProfileStep:
-    duration_ms: int
-    target_temp_c: int  # x100
-    target_flow_ml: int  # x100
-    target_press_bar: int  # x100
-    priority: int  # Priority Enum
-    flags: int = 0
+class PayloadProfileNode:
+    time_offset_ms: int
+    priority: int  # Enum Priority
+    interpolation: int  # Enum Interpolation
+
+    # Values passed as Floats (Human Readable)
+    # They will be scaled and packed as uint8
+    temp_target: float  # C
+    temp_tol: float
+
+    press_target: float  # Bar
+    press_tol: float
+
+    flow_in_target: float  # ml/s (Pump)
+    flow_in_tol: float
+
+    flow_out_target: float  # ml/s (Scales)
+    flow_out_tol: float
+
+    energy_target: int  # 0-255
+    energy_tol: int
 
     def pack(self) -> bytes:
+        # 1. Config Flags: Bits 0-1 (Interp), Bits 2-3 (Prio)
+        config = (self.interpolation & 0x03) | ((self.priority & 0x03) << 2)
+
+        # 2. Scaling helper
+        def _s(val, factor):
+            i = int(round(val / factor))
+            return max(0, min(255, i))
+
+        # 3. Pack: H (time) B (flags) 10B (targets/tols)
         return struct.pack(
-            "<HhhhBB",
-            self.duration_ms,
-            self.target_temp_c,
-            self.target_flow_ml,
-            self.target_press_bar,
-            self.priority,
-            self.flags,
+            "<HB BBBBBBBBBB",
+            self.time_offset_ms,
+            config,
+            _s(self.temp_target, 0.5),
+            _s(self.temp_tol, 0.5),
+            _s(self.press_target, 0.1),
+            _s(self.press_tol, 0.1),
+            _s(self.flow_in_target, 0.1),
+            _s(self.flow_in_tol, 0.1),
+            _s(self.flow_out_target, 0.1),
+            _s(self.flow_out_tol, 0.1),
+            _s(self.energy_target, 1),
+            _s(self.energy_tol, 1),
         )
 
 
 @dataclass
+class PayloadProfileLoad:
+    profile_id: int
+    nodes: List[PayloadProfileNode]
+
+    def pack(self) -> bytes:
+        if len(self.nodes) > 17:
+            raise ValueError(f"Too many nodes: {len(self.nodes)} > 17")
+
+        payload = struct.pack("<BB", self.profile_id, len(self.nodes))
+        for node in self.nodes:
+            payload += node.pack()
+        return payload
+
+
+@dataclass
 class PayloadHapticConfig:
-    mode: int  # HapticMode Enum
-    strength: int  # 0-100
-    param_1: int  # int16
-    param_2: int  # int16
+    mode: int
+    strength: int
+    param_1: int
+    param_2: int
 
     def pack(self) -> bytes:
         return struct.pack(
@@ -147,31 +198,29 @@ class PayloadHapticConfig:
 
 @dataclass
 class PayloadScaleData:
-    timestamp_ms: int  # uint32
-    weight_mg: int  # int32
-    flow_mg_s: int  # int16
-    status: int  # uint8
+    timestamp_ms: int
+    weight_mg: int
+    flow_mg_s: int
+    status: int
 
     @classmethod
     def unpack(cls, data: bytes):
         if len(data) < 11:
             return None
-        vals = struct.unpack("<IihB", data[:11])
-        return cls(*vals)
+        return cls(*struct.unpack("<IihB", data[:11]))
 
 
 @dataclass
 class PayloadInputEvent:
     source_index: int
     event_type: int
-    value: int  # int32
+    value: int
 
     @classmethod
     def unpack(cls, data: bytes):
         if len(data) < 6:
             return None
-        vals = struct.unpack("<BBi", data[:6])
-        return cls(*vals)
+        return cls(*struct.unpack("<BBi", data[:6]))
 
 
 # === 6. MAIN FRAME ===
@@ -215,11 +264,11 @@ class MeshFrame:
         )
 
         if magic != HU_PROTOCOL_MAGIC:
-            return None, data[1:]  # Sync lost
+            return None, data[1:]
 
         total_len = HEADER_SIZE + p_len
         if len(data) < total_len:
-            return None, data  # Wait for more data
+            return None, data
 
         frame = cls(
             src_id=src,
