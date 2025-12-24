@@ -28,6 +28,7 @@ class DeviceType(IntEnum):
     HAPTIC_KNOB = 0x30
     BUTTON_PAD = 0x31
     SENSOR_HUB = 0x32
+    TEST_DEVICE = 0xA0
 
 
 # === 3. MSG TYPES ===

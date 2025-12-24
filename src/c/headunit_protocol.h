@@ -44,7 +44,9 @@ typedef enum
   HU_TYPE_SCALES = 0x20,      // Load cell bridge
   HU_TYPE_HAPTIC_KNOB = 0x30, // Motor + Encoder + Screen
   HU_TYPE_BUTTON_PAD = 0x31,  // Simple buttons
-  HU_TYPE_SENSOR_HUB = 0x32   // Multiple temp/pressure sensors
+  HU_TYPE_SENSOR_HUB = 0x32,  // Multiple temp/pressure sensors
+
+  HU_TYPE_TEST_DEVICE = 0xA0
 } hu_device_type_t;
 
 // === 3. MESSAGE TYPES ===
